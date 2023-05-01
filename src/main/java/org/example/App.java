@@ -1,11 +1,11 @@
 package org.example;
 
-import com.graphhopper.jsprit.core.algorithm.state.StateId;
-import com.graphhopper.jsprit.analysis.toolbox.GraphStreamViewer;
-import com.graphhopper.jsprit.analysis.toolbox.GraphStreamViewer.Label;
+import com.graphhopper.jsprit.analysis.toolbox.Plotter;
 import com.graphhopper.jsprit.core.algorithm.VehicleRoutingAlgorithm;
-import com.graphhopper.jsprit.core.algorithm.box.SchrimpfFactory;
+import com.graphhopper.jsprit.core.algorithm.box.Jsprit;
+import com.graphhopper.jsprit.core.algorithm.state.StateId;
 import com.graphhopper.jsprit.core.algorithm.state.StateManager;
+import com.graphhopper.jsprit.core.algorithm.state.VehicleDependentTraveledDistance;
 import com.graphhopper.jsprit.core.problem.Location;
 import com.graphhopper.jsprit.core.problem.VehicleRoutingProblem;
 import com.graphhopper.jsprit.core.problem.constraint.ConstraintManager;
@@ -18,7 +18,6 @@ import com.graphhopper.jsprit.core.problem.vehicle.VehicleImpl;
 import com.graphhopper.jsprit.core.problem.vehicle.VehicleTypeImpl;
 import com.graphhopper.jsprit.core.reporting.SolutionPrinter;
 import com.graphhopper.jsprit.core.util.Solutions;
-import com.graphhopper.jsprit.analysis.toolbox.Plotter;
 
 import java.io.File;
 import java.util.*;
@@ -42,7 +41,7 @@ public class App
     final static int CUSTOMER_VEHICLE_VARIABLE_DISTANCE_COST = 2;
 
     final static double WALMART_VEHICLE_MAX_DISTANCE = 35*8;
-    final static double CUSTOMER_MAX_DISTANCE_RATIO = .0001;
+    final static double CUSTOMER_MAX_DISTANCE_RATIO = 0;
 
     final static int STORE_X = 10;
     final static int STORE_Y = 10;
@@ -51,7 +50,7 @@ public class App
     final static int VOLUME_INDEX = 0;
     final static int MAX_STOP_INDEX = 1;
 
-    final static Random r = new Random();
+    final static Random r = new Random(1234);
 
     final static Map<Vehicle, Double> maxDistanceMap = new HashMap<>();
 
@@ -78,6 +77,7 @@ public class App
         }
 
         // Add random store pickup customers
+        List<Service> customerHomes = new ArrayList<>();
         for (int i=0; i<NUM_SUPER_SHOPPERS; i++) {
             Service service = getNewService(
                     String.valueOf(NUM_DELIVERIES + i),
@@ -88,14 +88,27 @@ public class App
                     List.of("customer " + i)
             );
             vrpBuilder.addJob(service);
-            vrpBuilder.addVehicle(getCustomerVehicle(i, service.getLocation()));
+            customerHomes.add(service);
         }
 
         // Solve
         VehicleRoutingProblem problem = vrpBuilder.build();
-        addMaxDistanceConstraint(problem, maxDistanceMap);
+        StateManager stateManager = new StateManager(problem);
+        ConstraintManager constraintManager = new ConstraintManager(problem, stateManager);
 
-        VehicleRoutingProblemSolution solution = solve(problem);
+        for (int i=0; i<NUM_SUPER_SHOPPERS; i++) {
+            vrpBuilder.addVehicle(getCustomerVehicle(problem, i, customerHomes.get(i).getLocation()));
+        }
+
+        // This is incredibly dumb, but we have to build the problem to get the distance to the customer
+        // to build the vehicle, but then we add the vehicle to the builder, so we have to re-build the problem
+        problem = vrpBuilder.build();
+        stateManager = new StateManager(problem);
+        constraintManager = new ConstraintManager(problem, stateManager);
+
+        addMaxDistanceConstraint(problem, stateManager, constraintManager, maxDistanceMap);
+
+        VehicleRoutingProblemSolution solution = solve(problem, stateManager, constraintManager);
 
         solution.getCost();
 
@@ -107,7 +120,7 @@ public class App
         plotter.plot("output/solution.png", "solution");
 
         // Animate
-        new GraphStreamViewer(problem, solution).labelWith(Label.ID).setRenderDelay(10).display();
+//        new GraphStreamViewer(problem, solution).labelWith(Label.ID).setRenderDelay(10).display();
     }
 
     public static void createOutputDir() {
@@ -121,9 +134,10 @@ public class App
         }
     }
 
-    public static VehicleRoutingProblemSolution solve(VehicleRoutingProblem problem) {
-        // Get the algorithm out-of-the-box.
-        VehicleRoutingAlgorithm algorithm = new SchrimpfFactory().createAlgorithm(problem);
+    public static VehicleRoutingProblemSolution solve(VehicleRoutingProblem problem, StateManager stateManager, ConstraintManager constraintManager) {
+        VehicleRoutingAlgorithm algorithm = Jsprit.Builder.newInstance(problem)
+                .setStateAndConstraintManager(stateManager, constraintManager)
+                .buildAlgorithm();
 
         // Search for a solution
         Collection<VehicleRoutingProblemSolution> solutions = algorithm.searchSolutions();
@@ -133,14 +147,14 @@ public class App
     }
 
     public static VehicleImpl getWalmartVehicle() {
-        VehicleTypeImpl vehicleType = VehicleTypeImpl.Builder.newInstance("walmartVehicleType")
+        VehicleTypeImpl vehicleType = VehicleTypeImpl.Builder.newInstance("walmartVehicle")
                 .addCapacityDimension(VOLUME_INDEX, WALMART_VEHICLE_CAPACITY)
                 .addCapacityDimension(MAX_STOP_INDEX, WALMART_VEHICLE_MAX_STOPS)
                 .setFixedCost(WALMART_VEHICLE_FIXED_COST)
                 .setCostPerDistance(WALMART_VEHICLE_VARIABLE_DISTANCE_COST)
                 .build();
 
-        VehicleImpl walmartVehicle = VehicleImpl.Builder.newInstance("walmartVehicleType")
+        VehicleImpl walmartVehicle = VehicleImpl.Builder.newInstance("walmartVehicle")
                 .setStartLocation(Location.newInstance(STORE_X, STORE_Y))
                 .setType(vehicleType)
                 .build();
@@ -149,34 +163,27 @@ public class App
         return walmartVehicle;
     }
 
-    public static VehicleImpl getCustomerVehicle(int vehicleNum, Location customerLocation) {
-        VehicleTypeImpl vehicleType = VehicleTypeImpl.Builder.newInstance("customerVehicleType " + vehicleNum)
+    public static VehicleImpl getCustomerVehicle(VehicleRoutingProblem problem, int vehicleNum, Location customerLocation) {
+        VehicleTypeImpl vehicleType = VehicleTypeImpl.Builder.newInstance("customerVehicle " + vehicleNum)
                 .addCapacityDimension(VOLUME_INDEX, CUSTOMER_VEHICLE_CAPACITY)
                 .addCapacityDimension(MAX_STOP_INDEX, CUSTOMER_VEHICLE_MAX_STOPS)
                 .setFixedCost(CUSTOMER_VEHICLE_FIXED_COST)
                 .setCostPerDistance(CUSTOMER_VEHICLE_VARIABLE_DISTANCE_COST)
                 .build();
 
-        VehicleImpl customerVehicle = VehicleImpl.Builder.newInstance("customerVehicleType " + vehicleNum)
+        VehicleImpl customerVehicle = VehicleImpl.Builder.newInstance("customerVehicle " + vehicleNum)
                 .setStartLocation(Location.newInstance(STORE_X, STORE_Y))
                 .setType(vehicleType)
                 .addSkill("customer " + vehicleNum)
                 .build();
 
-        maxDistanceMap.put(customerVehicle, getCustomerMaxDistance(customerLocation));
+        Location storeLocation = problem.getAllLocations().stream()
+                .filter(l -> l.getCoordinate().getX() == 10 && l.getCoordinate().getY() == 10)
+                .findFirst().orElseThrow();
+        double transitDistance = problem.getTransportCosts().getDistance(storeLocation, customerLocation, 1, customerVehicle);
+        maxDistanceMap.put(customerVehicle, 2 * transitDistance * (1 + CUSTOMER_MAX_DISTANCE_RATIO));
+
         return customerVehicle;
-    }
-
-    public static double getCustomerMaxDistance(Location customerLocation) {
-        double customerX = customerLocation.getCoordinate().getX();
-        double customerY = customerLocation.getCoordinate().getY();
-
-        double customerDistanceToStore = Math.sqrt(
-                Math.pow(STORE_X - customerX, 2) +
-                        Math.pow(STORE_Y - customerY, 2)
-        );
-
-        return customerDistanceToStore * (1 + CUSTOMER_MAX_DISTANCE_RATIO);
     }
 
     public static Service getNewService(String id, int rangeMin, int rangeMax, int weightMin, int weightMax, Collection<String> skills) {
@@ -192,23 +199,26 @@ public class App
                 .build();
     }
 
-    private static void addMaxDistanceConstraint(VehicleRoutingProblem problem, Map<Vehicle, Double> vehicleDistanceMap) {
+    private static void addMaxDistanceConstraint(VehicleRoutingProblem problem, StateManager stateManager, ConstraintManager constraintManager, Map<Vehicle, Double> vehicleDistanceMap) {
 
-        StateManager stateManager = new StateManager(problem);
-        StateId distanceId = stateManager.createStateId("distance");
+        StateId maxDistance = stateManager.createStateId("max-distance");
 
-        DistanceUpdater distanceUpdater =
-                new DistanceUpdater(distanceId, stateManager, problem.getTransportCosts());
+        stateManager.addStateUpdater(
+                new VehicleDependentTraveledDistance(
+                        problem.getTransportCosts(),
+                        stateManager,
+                        maxDistance,
+                        vehicleDistanceMap.keySet()
+                )
+        );
 
-        stateManager.addStateUpdater(distanceUpdater);
         HardActivityConstraint distanceConstraint = new MaxDistanceConstraint(
                 stateManager,
-                distanceId,
+                maxDistance,
                 problem.getTransportCosts(),
                 vehicleDistanceMap
         );
 
-        ConstraintManager constraintManager = new ConstraintManager(problem, stateManager);
-        constraintManager.addConstraint(distanceConstraint, ConstraintManager.Priority.LOW);
+        constraintManager.addConstraint(distanceConstraint, ConstraintManager.Priority.CRITICAL);
     }
 }
