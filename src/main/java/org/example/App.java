@@ -41,7 +41,7 @@ public class App
     final static int CUSTOMER_VEHICLE_VARIABLE_DISTANCE_COST = 2;
 
     final static double WALMART_VEHICLE_MAX_DISTANCE = 35*8;
-    final static double CUSTOMER_MAX_DISTANCE_RATIO = 0;
+    final static double CUSTOMER_MAX_DISTANCE_RATIO = 0.1;
 
     final static int STORE_X = 10;
     final static int STORE_Y = 10;
@@ -194,6 +194,7 @@ public class App
 
         return Service.Builder.newInstance(String.valueOf(id))
                 .addSizeDimension(VOLUME_INDEX, randomWeight)
+                .addSizeDimension(MAX_STOP_INDEX, 1)
                 .setLocation(Location.newInstance(randomX, randomY))
                 .addAllRequiredSkills(skills)
                 .build();
